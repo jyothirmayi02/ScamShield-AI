@@ -9,7 +9,6 @@ from typing import Dict, List, Tuple
 import joblib
 import streamlit as st
 
-# Configure page settings
 st.set_page_config(
     page_title="ScamShield AI",
     page_icon="🛡️",
@@ -22,7 +21,6 @@ MODEL_PATH = Path(__file__).resolve().parent / "models" / "spam_pipeline.joblib"
 
 @st.cache_resource
 def load_pipeline():
-    """Caches the trained pipeline in memory for sub-second user queries."""
     if not MODEL_PATH.exists():
         return None
     try:
@@ -32,14 +30,14 @@ def load_pipeline():
 
 
 # ---------------------------------------------------------
-# Rule-Based Heuristics Engine
+# Enhanced Rule-Based Heuristics Engine
 # ---------------------------------------------------------
 RULES_CONFIG = [
     {
         "id": "credential_otp",
         "title": "Credential or Security Code Request",
         "regex": r"\b(otp|one[-\s]?time[-\s]?password|pin|password|verification\s*code|cvv|secret\s*code)\b",
-        "explanation": "Legitimate institutions and technical support teams never request passwords, OTPs, or CVVs via chat or SMS.",
+        "explanation": "Legitimate institutions and support teams never ask you to reveal passwords, OTPs, or CVVs via message.",
     },
     {
         "id": "banking_card",
@@ -56,14 +54,14 @@ RULES_CONFIG = [
     {
         "id": "artificial_urgency",
         "title": "Artificial Urgency or Time Pressure",
-        "regex": r"\b(urgent|immediately|act\s*now|within\s*\d+\s*(mins?|minutes?|hours?)|expires\s*today|final\s*notice|last\s*chance)\b",
-        "explanation": "Scammers trigger panic using fake deadlines to prevent targets from verifying the claims independently.",
+        "regex": r"\b(urgent|urgently|immediately|act\s*now|within\s*\d+\s*(mins?|minutes?|hours?)|tonight|expires\s*today|final\s*notice|last\s*chance)\b",
+        "explanation": "Scammers trigger panic using fake deadlines to prevent targets from verifying claims independently.",
     },
     {
-        "id": "account_coercion",
-        "title": "Account Suspension or Threat of Action",
-        "regex": r"\b(suspended|terminated|deactivated|blocked|legal\s*action|arrest\s*warrant|lawsuit|police|frozen)\b",
-        "explanation": "Threats of account suspension or police involvement are standard coercive tactics used to demand compliance.",
+        "id": "service_coercion",
+        "title": "Account/Service Disconnection or Legal Coercion",
+        "regex": r"\b(suspended|terminated|deactivated|blocked|disconnected|disconnection|power\s*cut|legal\s*action|arrest\s*warrant|lawsuit|police|frozen|freeze)\b",
+        "explanation": "Threats of immediate power disconnection, account freezing, or police action are standard coercive scam tactics.",
     },
     {
         "id": "lottery_prize",
@@ -75,35 +73,27 @@ RULES_CONFIG = [
         "id": "suspicious_links",
         "title": "Embedded Hyperlink or Shortener Detected",
         "regex": r"(https?://\S+|www\.\S+|bit\.ly/\S+|tinyurl\.com/\S+|t\.co/\S+)",
-        "explanation": "Links—especially shortened ones—are often used to disguise phishing portals or malware downloads.",
+        "explanation": "Shortened or non-official links are frequently used to route victims to phishing portals.",
     },
 ]
 
 
 def detect_warning_signs(text: str) -> List[Dict[str, str]]:
-    """Evaluates input text against the rule configurations using regular expressions."""
     matched = []
     for rule in RULES_CONFIG:
         if re.search(rule["regex"], text, flags=re.IGNORECASE):
             matched.append(
-                {
-                    "title": rule["title"],
-                    "explanation": rule["explanation"],
-                }
+                {"title": rule["title"], "explanation": rule["explanation"]}
             )
     return matched
 
 
 # ---------------------------------------------------------
-# Risk Assessment Engine
+# Robust Risk Assessment Matrix
 # ---------------------------------------------------------
 def compute_risk(
-    is_spam_model: bool, warning_count: int, length: int
+    is_spam_model: bool, warning_count: int, length: int, warnings: list
 ) -> Tuple[str, str, str]:
-    """
-    Computes overall risk level by combining model prediction and rule counts.
-    Returns: (Risk Label, UI Color Badge, Explanation)
-    """
     if length < 10:
         return (
             "Caution (Insufficient Content)",
@@ -111,29 +101,53 @@ def compute_risk(
             "The message is too short for reliable statistical or rule-based analysis.",
         )
 
-    if is_spam_model and warning_count >= 2:
+    # Detect high-severity triggers (links + urgency/disconnection/credential theft)
+    has_link = any(
+        w["title"] == "Embedded Hyperlink or Shortener Detected"
+        for w in warnings
+    )
+    has_coercion = any(
+        w["title"] == "Account/Service Disconnection or Legal Coercion"
+        for w in warnings
+    )
+    has_credential = any(
+        w["title"] == "Credential or Security Code Request" for w in warnings
+    )
+    has_fee = any(
+        w["title"] == "Advance / Upfront Fee Demand" for w in warnings
+    )
+
+    # 1. High Risk conditions:
+    # - Model flagged + at least 1 rule
+    # - OR 2+ warning rules matched (even if older ML missed it)
+    # - OR dangerous combinations (e.g. Disconnection threat + Link, or OTP + Urgency)
+    if (
+        (is_spam_model and warning_count >= 1)
+        or warning_count >= 2
+        or (has_link and has_coercion)
+        or (has_credential)
+        or (has_fee)
+    ):
         return (
             "High Risk",
             "red",
-            "Both the ML model flagged spam patterns and multiple explicit scam red flags were matched.",
+            "Critical warning signs were detected (such as direct credential requests, upfront fees, or coercive threats paired with links).",
         )
-    elif is_spam_model or warning_count >= 2:
+
+    # 2. Medium Risk: Model flagged alone, OR exactly 1 non-critical rule matched
+    elif is_spam_model or warning_count == 1:
         return (
             "Medium Risk",
             "orange",
-            "Either the ML model flagged suspicious language OR multiple warning signs were triggered.",
+            "The message triggered pattern flags. Verify independently before acting.",
         )
-    elif warning_count == 1:
-        return (
-            "Low-to-Medium Risk",
-            "orange",
-            "The ML model did not flag spam patterns, but 1 specific warning sign was found. Review carefully.",
-        )
+
+    # 3. Clean
     else:
         return (
             "Low Risk",
             "green",
-            "No heuristic red flags were detected, and the message aligns with typical legitimate text.",
+            "No heuristic red flags were detected, and the message contains no high-risk solicitation indicators.",
         )
 
 
@@ -146,24 +160,21 @@ with st.sidebar:
         """
     **Dual-Layer Screening Architecture:**
     1. **Machine Learning Pipeline:**
-       - **TF-IDF Vectorizer:** Extracts term frequency and downweights generic English words.
-       - **Multinomial Naive Bayes:** Probabilistic classifier trained on the UCI SMS Spam dataset.
+       - TF-IDF vectorization + Multinomial Naive Bayes trained on the SMS Spam Collection.
     2. **Deterministic Rules Engine:**
-       - Regular expressions flag direct requests for OTPs, upfront recruitment fees, urgency hooks, and links.
+       - Scans for advance fees, urgency, disconnection threats, credentials, and suspicious links.
     """
     )
-
     st.markdown("---")
     st.header("🔒 Privacy & Safety")
     st.info(
-        "Submitted messages are processed entirely in-memory for the current session. "
-        "No messages are logged, stored, or sent to external databases. "
-        "Please remove personal identifying information before testing."
+        "Submitted messages are processed entirely in-memory for the current request. "
+        "No personal text is persisted or logged."
     )
 
 
 # ---------------------------------------------------------
-# Main Interface
+# Main UI
 # ---------------------------------------------------------
 st.title("🛡️ ScamShield AI")
 st.subheader("Suspicious Message & Scam Screening System")
@@ -172,18 +183,18 @@ st.caption("An educational screening tool to help evaluate incoming communicatio
 pipeline = load_pipeline()
 if pipeline is None:
     st.error(
-        "⚠️ Model artifact not found! Run `python train_model.py` in your terminal first to build `spam_pipeline.joblib`."
+        "⚠️ Model artifact not found! Run `python train_model.py` in your terminal to build `spam_pipeline.joblib`."
     )
 
-# Sample Message Selector
-st.markdown("##### 🧪 Test with preset samples:")
+# Expanded presets with Category A, B, and C
 sample_options = {
-    "Select a preset sample...": "",
-    "Legitimate: Meeting reminder": "Hi team, let's meet in Conference Room B at 3:00 PM for sprint planning.",
-    "Legitimate: Delivery update": "Your delivery package #4920 has arrived at the reception desk.",
-    "Scam: Urgent Bank OTP / Block": "URGENT: Your bank account has been locked. Reply with your OTP within 15 minutes to prevent suspension.",
-    "Scam: Upfront Fee Job Offer": "Congratulations! You are selected for our remote data entry role at $40/hr. Send $50 registration fee to begin.",
-    "Scam: Prize Lottery Claim": "You won $10,000 in our lucky draw! Visit http://bit.ly/cash-prize now to claim your reward before it expires.",
+    "Select an example...": "",
+    "[Category A] WhatsApp Freelance Scam": "Dear candidate, your resume has been shortlisted for a freelance video review role. Earn $300-$500 daily by liking YouTube videos. To activate your employee portal, kindly deposit a refundable security deposit of $35. Act now as seats are limited.",
+    "[Category A] Electricity Disconnection Phishing": "URGENT NOTICE: Your electricity connection power will be disconnected tonight at 9:30 PM due to an unpaid pending bill from last month. Immediately contact our officer at http://bit.ly/power-pay to clear charges and avoid account freeze.",
+    "[Category A] Tax / Police Coercion Scam": "Federal Tax Authority: A legal action notice and arrest warrant has been filed under your name for tax discrepancy. Please call immediately and share your verification code to speak with an agent.",
+    "[Category B] Normal Personal Message": "Hey Mom, I lost my bus pass so I might be running about 20 minutes late for dinner. Don't wait up for me, go ahead and eat!",
+    "[Category B] Normal Workplace Update": "Hi Team, please find attached the slide deck for our quarterly project review scheduled for Thursday at 10 AM. Let me know if you have any questions before then.",
+    "[Category C] Legitimate Security Alert (No OTP Asked)": "Google Security Alert: A new sign-in was detected on your account from a Windows device. If this was you, you can safely ignore this alert.",
 }
 
 chosen_sample = st.selectbox(
@@ -192,7 +203,6 @@ chosen_sample = st.selectbox(
 )
 default_text = sample_options[chosen_sample]
 
-# User Input Text Area
 user_input = st.text_area(
     "Paste message text below:",
     value=default_text,
@@ -208,7 +218,7 @@ with col_reset:
         st.rerun()
 
 # ---------------------------------------------------------
-# Results Processing
+# Processing & Display
 # ---------------------------------------------------------
 if analyze_btn:
     cleaned_input = user_input.strip()
@@ -218,22 +228,17 @@ if analyze_btn:
     elif pipeline is None:
         st.error("Cannot run analysis because `spam_pipeline.joblib` is missing.")
     else:
-        # 1. ML inference
         pred_code = pipeline.predict([cleaned_input])[0]
         is_spam = bool(pred_code == 1)
 
-        # 2. Rule-based evaluation
         warnings = detect_warning_signs(cleaned_input)
-
-        # 3. Combined risk calculation
         risk_level, badge_color, reasoning = compute_risk(
-            is_spam, len(warnings), len(cleaned_input)
+            is_spam, len(warnings), len(cleaned_input), warnings
         )
 
         st.markdown("---")
         st.subheader("Analysis Findings")
 
-        # Visual indicator badges
         b1, b2, b3 = st.columns(3)
         with b1:
             if is_spam:
@@ -252,14 +257,9 @@ if analyze_btn:
             else:
                 st.success(f"✅ Risk Level: **{risk_level}**")
 
-        # Explain the calculation
         with st.expander("ℹ️ How was this risk score determined?", expanded=True):
             st.write(f"**Rationale:** {reasoning}")
-            st.caption(
-                "Scoring Matrix: High = ML Flag + ≥2 rules | Medium = ML Flag OR ≥2 rules | Low-Medium = 1 rule | Low = Clean ML + 0 rules."
-            )
 
-        # Matched Warning Signs
         st.markdown("#### 🚩 Specific Warning Signs Detected")
         if warnings:
             for item in warnings:
@@ -267,28 +267,25 @@ if analyze_btn:
                     st.markdown(f"**{item['title']}**")
                     st.caption(item["explanation"])
         else:
-            st.info("No explicit warning signs (such as OTP requests, fees, or urgency) were detected.")
+            st.info("No explicit warning signs were detected.")
 
-        # Practical Next Steps
         st.markdown("#### 💡 Recommended Next Actions")
-        if risk_level in ["High Risk", "Medium Risk", "Low-to-Medium Risk"]:
+        if risk_level in ["High Risk", "Medium Risk"]:
             st.markdown(
                 """
-            - **Never disclose OTPs, PINs, or passwords:** No verified company will ever ask you to read back a verification code.
-            - **Do not pay upfront recruitment fees:** Legitimate companies never ask you to pay for training, onboarding kits, or equipment.
-            - **Navigate independently:** Do not click links or call numbers provided in the message. Open your browser and search for the company's official domain.
+            - **Never disclose OTPs, PINs, or passwords:** No verified company asks you to read back verification codes.
+            - **Do not pay upfront fees:** Real employers and contest organizers do not charge upfront deposits.
+            - **Verify independently:** Do not click links or call numbers sent in the message. Check the organization's official website directly.
             """
             )
         else:
             st.markdown(
                 """
-            - No immediate red flags were detected, but always confirm unexpected requests match previous conversations with the sender.
-            - Never bypass security alerts in your browser or phone messaging application.
+            - No immediate red flags were detected. Always confirm unexpected messages through known contact channels.
             """
             )
 
-        # Disclaimer
         st.markdown("---")
         st.caption(
-            "**Educational Disclaimer:** ScamShield AI is a pattern-screening demonstration. It does not provide definitive legal or security guarantees. Always verify sensitive matters through official channels."
+            "**Educational Disclaimer:** ScamShield AI is a pattern-screening demonstration. It does not provide definitive legal or security guarantees."
         )
